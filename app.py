@@ -5,63 +5,88 @@ import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# ─── PAGE CONFIG ───────────────────────────────────────
-st.set_page_config(layout="wide", page_title="Pro Crypto Terminal", page_icon="📈")
+# ─── CONFIG ─────────────────────────────────────────────
+st.set_page_config(page_title="Crypto Dashboard", layout="wide", page_icon="📊")
+st.title("📊 Market Based Crypto Dashboard")
 
-# ─── DARK THEME CSS ────────────────────────────────────
-st.markdown("""
-<style>
-body {background-color: #0e1117;}
-.block-container {padding-top: 1rem;}
-</style>
-""", unsafe_allow_html=True)
+# ─── SIDEBAR ────────────────────────────────────────────
+with st.sidebar:
+    st.header("⚙️ Settings")
 
-st.title("📈 Crypto Trading Terminal")
+    coins = {
+        "Bitcoin": "bitcoin",
+        "Ethereum": "ethereum",
+        "BNB": "binancecoin",
+        "Solana": "solana"
+    }
 
-# ─── FETCH DATA (CoinGecko) ────────────────────────────
+    timeframes = {
+        "1 Minute": "1min",
+        "5 Minutes": "5min",
+        "15 Minutes": "15min",
+        "1 Hour": "1H",
+        "4 Hours": "4H",
+        "1 Day": "1D"
+    }
+
+    selected_coin = st.selectbox("Select Asset", list(coins.keys()))
+    selected_tf = st.selectbox("Select Timeframe", list(timeframes.keys()))
+
+    coin_id = coins[selected_coin]
+    tf = timeframes[selected_tf]
+
+    if st.button("🔄 Refresh Data"):
+        st.cache_data.clear()
+
+# ─── FETCH DATA ─────────────────────────────────────────
 @st.cache_data(ttl=60)
-def fetch_data():
-    url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1"
-    res = requests.get(url, timeout=10)
-    data = res.json()
-
-    return pd.DataFrame([{
-        "name": c["name"],
-        "symbol": c["symbol"].upper(),
-        "price": c["current_price"],
-        "change": c["price_change_percentage_24h"],
-        "market_cap": c["market_cap"],
-        "id": c["id"]
-    } for c in data])
-
-@st.cache_data(ttl=60)
-def fetch_history(coin_id):
+def fetch_data(coin_id):
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=10"
     res = requests.get(url, timeout=10)
+
+    if res.status_code != 200:
+        return pd.DataFrame()
+
     data = res.json()
 
     df = pd.DataFrame(data["prices"], columns=["time", "price"])
     df["time"] = pd.to_datetime(df["time"], unit="ms")
     df.set_index("time", inplace=True)
+
     return df
 
-def resample_df(df, tf):
-    ohlc = df["price"].resample(tf).ohlc()
-    ohlc.dropna(inplace=True)
-    return ohlc.reset_index()
+# ─── RESAMPLE FUNCTION ──────────────────────────────────
+def resample_df(df, timeframe):
+    try:
+        ohlc = df["price"].resample(timeframe).ohlc()
+        ohlc["volume"] = 0
+        ohlc = ohlc.dropna().reset_index()
+        return ohlc
+    except Exception as e:
+        st.error(f"Resample Error: {e}")
+        return pd.DataFrame()
 
 # ─── LOAD DATA ─────────────────────────────────────────
-coins = fetch_data()
-selected = st.sidebar.selectbox("Select Coin", coins["name"])
-tf = st.sidebar.selectbox("Timeframe", ["5T","15T","1H","4H","1D"])
+df_raw = fetch_data(coin_id)
 
-coin = coins[coins["name"] == selected].iloc[0]
-df_raw = fetch_history(coin["id"])
+if df_raw.empty:
+    st.error("❌ Failed to fetch data from CoinGecko")
+    st.stop()
+
 df = resample_df(df_raw, tf)
+
+if df.empty:
+    st.error("❌ Resampling failed")
+    st.stop()
 
 # ─── INDICATORS ─────────────────────────────────────────
 df["EMA20"] = df["close"].ewm(span=20).mean()
 df["EMA50"] = df["close"].ewm(span=50).mean()
+
+df["MA20"] = df["close"].rolling(20).mean()
+df["STD"] = df["close"].rolling(20).std()
+df["Upper"] = df["MA20"] + 2 * df["STD"]
+df["Lower"] = df["MA20"] - 2 * df["STD"]
 
 # RSI
 delta = df["close"].diff()
@@ -69,68 +94,68 @@ gain = delta.clip(lower=0)
 loss = -delta.clip(upper=0)
 rs = gain.rolling(14).mean() / loss.rolling(14).mean().replace(0, np.nan)
 df["RSI"] = 100 - (100 / (1 + rs))
-df["RSI"].fillna(50, inplace=True)
+df["RSI"] = df["RSI"].fillna(50)
 
 # MACD
 ema12 = df["close"].ewm(span=12).mean()
 ema26 = df["close"].ewm(span=26).mean()
 df["MACD"] = ema12 - ema26
 df["Signal"] = df["MACD"].ewm(span=9).mean()
-df["Hist"] = df["MACD"] - df["Signal"]
+df["MACD_Hist"] = df["MACD"] - df["Signal"]
 
-# ─── LAYOUT (TRADINGVIEW STYLE) ────────────────────────
-left, right = st.columns([3,1])
+# Signals
+df["Trade"] = "HOLD"
+df.loc[(df["RSI"] < 30) & (df["MACD"] > df["Signal"]), "Trade"] = "BUY"
+df.loc[(df["RSI"] > 70) & (df["MACD"] < df["Signal"]), "Trade"] = "SELL"
 
-# ─── MAIN CHART ────────────────────────────────────────
-with left:
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
-                        row_heights=[0.6,0.2,0.2])
+# ─── METRICS ───────────────────────────────────────────
+latest = df.iloc[-1]
+prev = df.iloc[-2]
 
-    # Candles
-    fig.add_trace(go.Candlestick(
-        x=df["time"],
-        open=df["open"],
-        high=df["high"],
-        low=df["low"],
-        close=df["close"],
-        increasing_line_color="#00ff9c",
-        decreasing_line_color="#ff4d4d"
-    ), row=1, col=1)
+change = latest["close"] - prev["close"]
+pct = (change / prev["close"]) * 100
 
-    # EMA
-    fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], line=dict(color="cyan")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], line=dict(color="orange")), row=1, col=1)
+c1, c2, c3, c4 = st.columns(4)
 
-    # MACD
-    colors = np.where(df["Hist"] >= 0, "green", "red")
-    fig.add_trace(go.Bar(x=df["time"], y=df["Hist"], marker_color=colors), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df["time"], y=df["MACD"], line=dict(color="blue")), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df["time"], y=df["Signal"], line=dict(color="orange")), row=2, col=1)
+c1.metric("💰 Price", f"${latest['close']:.2f}", f"{pct:.2f}%")
+c2.metric("📈 RSI", f"{latest['RSI']:.2f}")
+c3.metric("📉 MACD", f"{latest['MACD']:.2f}")
+c4.metric("🎯 Signal", latest["Trade"])
 
-    # RSI
-    fig.add_trace(go.Scatter(x=df["time"], y=df["RSI"], line=dict(color="purple")), row=3, col=1)
-    fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
-    fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
+# ─── CHART ─────────────────────────────────────────────
+st.subheader("📊 Technical Analysis")
 
-    fig.update_layout(template="plotly_dark", height=800, margin=dict(l=10,r=10,t=30,b=10))
-    st.plotly_chart(fig, use_container_width=True)
+fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
 
-# ─── SIDE PANEL (LIKE TRADINGVIEW WATCHLIST) ───────────
-with right:
-    st.subheader("📊 Watchlist")
+# Candlestick
+fig.add_trace(go.Candlestick(
+    x=df["time"],
+    open=df["open"],
+    high=df["high"],
+    low=df["low"],
+    close=df["close"],
+    increasing_line_color="#00e676",
+    decreasing_line_color="#ff5252"
+), row=1, col=1)
 
-    for _, row in coins.iterrows():
-        color = "green" if row["change"] > 0 else "red"
-        st.markdown(
-            f"""
-            **{row['symbol']}**  
-            ${row['price']:.2f}  
-            <span style='color:{color}'>{row['change']:.2f}%</span>
-            """,
-            unsafe_allow_html=True
-        )
+# EMA
+fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], name="EMA20", line=dict(color="cyan")), row=1, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], name="EMA50", line=dict(color="orange")), row=1, col=1)
 
-# ─── BOTTOM DATA TABLE ─────────────────────────────────
-st.markdown("---")
-st.subheader("📁 Market Data")
-st.dataframe(coins, use_container_width=True)
+# Bollinger Bands
+fig.add_trace(go.Scatter(x=df["time"], y=df["Upper"], line=dict(color="gray", dash="dot")), row=1, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["Lower"], fill='tonexty', line=dict(color="gray", dash="dot")), row=1, col=1)
+
+# MACD
+colors = np.where(df["MACD_Hist"] >= 0, "green", "red")
+fig.add_trace(go.Bar(x=df["time"], y=df["MACD_Hist"], marker_color=colors), row=2, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["MACD"], line=dict(color="blue")), row=2, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["Signal"], line=dict(color="orange")), row=2, col=1)
+
+fig.update_layout(template="plotly_dark", height=750, xaxis_rangeslider_visible=False)
+
+st.plotly_chart(fig, use_container_width=True)
+
+# ─── RAW DATA ──────────────────────────────────────────
+with st.expander("📁 View Raw Data & Trade Signals"):
+    st.dataframe(df.sort_values("time", ascending=False), use_container_width=True, hide_index=True)

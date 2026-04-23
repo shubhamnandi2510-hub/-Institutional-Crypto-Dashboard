@@ -1,11 +1,10 @@
 """
-Market Based Crypto Dashboard (Multi-Timeframe)
+Market Based Crypto Dashboard (Stable Version)
 
 Features:
-- Multi-timeframe (1m, 5m, 15m, 1h, 4h, 1d)
+- Multi-timeframe (5m, 15m, 1h, 4h, 1d)
 - Candlestick Chart
-- EMA (20, 50)
-- Bollinger Bands
+- EMA, Bollinger Bands
 - RSI, MACD
 - Buy/Sell Signals
 - Raw Data Table
@@ -19,7 +18,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # ─── CONFIG ─────────────────────────────────────────────
-st.set_page_config(page_title="Crypto Dashboard", layout="wide", page_icon="📊")
+st.set_page_config(page_title="Crypto Dashboard", layout="wide")
 st.title("📊 Market Based Crypto Dashboard")
 
 # ─── SIDEBAR ────────────────────────────────────────────
@@ -34,9 +33,8 @@ with st.sidebar:
     }
 
     timeframes = {
-        "1 Minute": "1T",
-        "5 Minutes": "5T",
-        "15 Minutes": "15T",
+        "5 Minutes": "5min",
+        "15 Minutes": "15min",
         "1 Hour": "1H",
         "4 Hours": "4H",
         "1 Day": "1D"
@@ -54,28 +52,45 @@ with st.sidebar:
 # ─── FETCH DATA ─────────────────────────────────────────
 @st.cache_data(ttl=60)
 def fetch_data(coin_id):
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=10"
-    res = requests.get(url, timeout=10)
-    data = res.json()
+    try:
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=10"
+        res = requests.get(url, timeout=10)
+        res.raise_for_status()
+        data = res.json()
 
-    df = pd.DataFrame(data["prices"], columns=["time", "price"])
-    df["time"] = pd.to_datetime(df["time"], unit="ms")
-    df.set_index("time", inplace=True)
+        if "prices" not in data:
+            return pd.DataFrame()
 
-    return df
+        df = pd.DataFrame(data["prices"], columns=["time", "price"])
+        df["time"] = pd.to_datetime(df["time"], unit="ms")
+        df = df.sort_values("time")
+        df.set_index("time", inplace=True)
 
-# ─── RESAMPLE TO TIMEFRAME ─────────────────────────────
+        return df
+
+    except Exception:
+        return pd.DataFrame()
+
+# ─── RESAMPLE (FIXED) ─────────────────────────────────
 def resample_df(df, timeframe):
-    ohlc = df["price"].resample(timeframe).ohlc()
-    ohlc["volume"] = 0
-    ohlc.dropna(inplace=True)
-    return ohlc.reset_index()
+    try:
+        ohlc = df["price"].resample(timeframe).ohlc()
+        ohlc.dropna(inplace=True)
+        return ohlc.reset_index()
+    except Exception:
+        return pd.DataFrame()
 
+# ─── LOAD DATA ─────────────────────────────────────────
 df_raw = fetch_data(coin_id)
+
+if df_raw.empty:
+    st.error("❌ Failed to load data. Try again.")
+    st.stop()
+
 df = resample_df(df_raw, tf)
 
-if df.empty:
-    st.error("No data available")
+if df.empty or len(df) < 2:
+    st.warning("⚠️ Not enough data for selected timeframe")
     st.stop()
 
 # ─── INDICATORS ─────────────────────────────────────────
@@ -93,7 +108,7 @@ gain = delta.clip(lower=0)
 loss = -delta.clip(upper=0)
 rs = gain.rolling(14).mean() / loss.rolling(14).mean().replace(0, np.nan)
 df["RSI"] = 100 - (100 / (1 + rs))
-df["RSI"].fillna(50, inplace=True)
+df["RSI"] = df["RSI"].fillna(50)
 
 # MACD
 ema12 = df["close"].ewm(span=12).mean()
@@ -137,24 +152,25 @@ fig.add_trace(go.Candlestick(
 ), row=1, col=1)
 
 # EMA
-fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], name="EMA20", line=dict(color="cyan")), row=1, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], name="EMA50", line=dict(color="orange")), row=1, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], name="EMA20"), row=1, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], name="EMA50"), row=1, col=1)
 
-# Bollinger
-fig.add_trace(go.Scatter(x=df["time"], y=df["Upper"], line=dict(color="gray", dash="dot")), row=1, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["Lower"], fill='tonexty', line=dict(color="gray", dash="dot")), row=1, col=1)
+# Bollinger Bands
+fig.add_trace(go.Scatter(x=df["time"], y=df["Upper"], line=dict(dash="dot")), row=1, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["Lower"], fill='tonexty'), row=1, col=1)
 
 # MACD
 colors = np.where(df["MACD_Hist"] >= 0, "green", "red")
 fig.add_trace(go.Bar(x=df["time"], y=df["MACD_Hist"], marker_color=colors), row=2, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["MACD"], line=dict(color="blue")), row=2, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["Signal"], line=dict(color="orange")), row=2, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["MACD"]), row=2, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["Signal"]), row=2, col=1)
 
 fig.update_layout(template="plotly_dark", height=750, xaxis_rangeslider_visible=False)
+
 st.plotly_chart(fig, use_container_width=True)
 
-# ─── RAW DATA + SIGNALS ────────────────────────────────
-with st.expander("📁 View Raw Data & Trade Signals", expanded=False):
+# ─── RAW DATA ─────────────────────────────────────────
+with st.expander("📁 View Raw Data & Trade Signals"):
     st.dataframe(
         df.sort_values("time", ascending=False),
         use_container_width=True,

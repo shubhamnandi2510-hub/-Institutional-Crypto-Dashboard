@@ -15,6 +15,17 @@ with st.sidebar:
 
     currency = st.selectbox("Select Currency", ["usd", "eur", "inr"])
 
+    timeframe_map = {
+        "1 Minute": "1min",
+        "15 Minutes": "15min",
+        "1 Hour": "1h",
+        "4 Hours": "4h",
+        "1 Day": "1d"
+    }
+
+    selected_tf_label = st.selectbox("Select Timeframe", list(timeframe_map.keys()))
+    selected_tf = timeframe_map[selected_tf_label]
+
     if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
 
@@ -42,7 +53,7 @@ def fetch_top_coins(currency):
 
         return df
 
-    except Exception:
+    except:
         return pd.DataFrame()
 
 # ─── FETCH PRICE HISTORY ─────────────────────────────────
@@ -64,17 +75,17 @@ def fetch_price_history(coin_id, currency):
 
         return df
 
-    except Exception:
+    except:
         return pd.DataFrame()
 
 # ─── LOAD DATA ──────────────────────────────────────────
 df_top = fetch_top_coins(currency)
 
 if df_top.empty:
-    st.error("⚠️ Unable to fetch crypto data. Please try again later.")
+    st.error("⚠️ Unable to fetch crypto data")
     st.stop()
 
-# ─── TOP 10 TABLE ───────────────────────────────────────
+# ─── TOP TABLE ──────────────────────────────────────────
 st.subheader("🏆 Top 10 Cryptocurrencies")
 
 df_display = df_top.copy()
@@ -84,26 +95,27 @@ df_display["change"] = df_display["change"].map(lambda x: f"{x:+.2f}%")
 st.dataframe(df_display, use_container_width=True, hide_index=True)
 
 # ─── SELECT COIN ────────────────────────────────────────
-coin_names = df_top["name"].tolist()
-selected_coin = st.selectbox("Select Coin", coin_names)
-
+selected_coin = st.selectbox("Select Coin", df_top["name"])
 coin_id = df_top[df_top["name"] == selected_coin]["id"].values[0]
 
 # ─── FETCH HISTORY ──────────────────────────────────────
 df_price = fetch_price_history(coin_id, currency)
 
-if df_price.empty or "price" not in df_price:
-    st.error("⚠️ Price data unavailable")
+if df_price.empty:
+    st.error("Price data unavailable")
     st.stop()
 
-# ─── RESAMPLE SAFE ──────────────────────────────────────
-ohlc = df_price["price"].resample("1h").ohlc().dropna()
+# ─── RESAMPLE (MULTI-TIMEFRAME) ─────────────────────────
+try:
+    ohlc = df_price["price"].resample(selected_tf).ohlc().dropna()
+except Exception:
+    st.error("Invalid timeframe selection")
+    st.stop()
 
 df = ohlc.reset_index()
 
-# ─── CHECK DATA LENGTH ─────────────────────────────────
 if len(df) < 2:
-    st.warning("Not enough data to calculate indicators")
+    st.warning("Not enough data")
     st.stop()
 
 # ─── INDICATORS ─────────────────────────────────────────
@@ -143,8 +155,8 @@ c2.metric("📈 RSI", f"{latest['RSI']:.2f}")
 c3.metric("📉 MACD", f"{latest['MACD']:.2f}")
 c4.metric("🎯 Signal", latest["Trade"])
 
-# ─── CANDLESTICK CHART ─────────────────────────────────
-st.subheader("📊 Candlestick Chart")
+# ─── CHART ─────────────────────────────────────────────
+st.subheader(f"📊 Candlestick Chart ({selected_tf_label})")
 
 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
 
@@ -160,24 +172,22 @@ fig.add_trace(go.Candlestick(
 ), row=1, col=1)
 
 # EMA
-fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], name="EMA20", line=dict(color="cyan")), row=1, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], name="EMA50", line=dict(color="orange")), row=1, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], line=dict(color="cyan")), row=1, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], line=dict(color="orange")), row=1, col=1)
 
-# MACD Histogram
+# MACD
 colors = np.where(df["MACD_Hist"] >= 0, "green", "red")
 fig.add_trace(go.Bar(x=df["time"], y=df["MACD_Hist"], marker_color=colors), row=2, col=1)
-
 fig.add_trace(go.Scatter(x=df["time"], y=df["MACD"], line=dict(color="blue")), row=2, col=1)
 fig.add_trace(go.Scatter(x=df["time"], y=df["Signal"], line=dict(color="orange")), row=2, col=1)
 
 fig.update_layout(template="plotly_dark", height=700, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)
 
-# ─── HEATMAP (BOTTOM) ──────────────────────────────────
-st.subheader("🔥 Market Heatmap (Top 10 Performance)")
+# ─── HEATMAP ───────────────────────────────────────────
+st.subheader("🔥 Market Heatmap")
 
-heatmap_data = df_top[["name", "change"]].copy()
-heatmap_data["change"] = heatmap_data["change"].fillna(0)
+heatmap_data = df_top[["name", "change"]].fillna(0)
 
 fig_heat = go.Figure(data=go.Heatmap(
     z=[heatmap_data["change"]],
@@ -191,4 +201,4 @@ st.plotly_chart(fig_heat, use_container_width=True)
 
 # ─── RAW DATA ──────────────────────────────────────────
 with st.expander("📁 View Raw Data & Trade Signals"):
-    st.dataframe(df.sort_values("time", ascending=False), use_container_width=True, hide_index=True)
+    st.dataframe(df.sort_values("time", ascending=False), use_container_width=True)

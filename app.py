@@ -3,11 +3,10 @@ import pandas as pd
 import numpy as np
 import requests
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 # ─── CONFIG ─────────────────────────────────────────────
 st.set_page_config(page_title="Crypto Dashboard Pro", layout="wide", page_icon="📊")
-st.title("📊 Market Based Crypto Dashboard (Pro)")
+st.title("📊 Market Based Crypto Dashboard")
 
 # ─── SIDEBAR ────────────────────────────────────────────
 with st.sidebar:
@@ -29,8 +28,14 @@ with st.sidebar:
         "1 Day": "1D"
     }
 
-    selected_coin = st.selectbox("Select Asset", list(coins.keys()))
-    selected_tf = st.selectbox("Select Timeframe", list(timeframes.keys()))
+    selected_coin = st.selectbox("Select Main Asset", list(coins.keys()))
+    compare_coins = st.multiselect(
+        "Compare With",
+        list(coins.keys()),
+        default=["Ethereum"]
+    )
+
+    selected_tf = st.selectbox("Timeframe", list(timeframes.keys()))
 
     coin_id = coins[selected_coin]
     tf = timeframes[selected_tf]
@@ -51,7 +56,6 @@ def fetch_data(coin_id):
     df = pd.DataFrame(data["prices"], columns=["time", "price"])
     df["time"] = pd.to_datetime(df["time"], unit="ms")
     df.set_index("time", inplace=True)
-
     return df
 
 # ─── RESAMPLE ──────────────────────────────────────────
@@ -60,6 +64,7 @@ def resample_df(df, timeframe):
     ohlc["volume"] = 0
     return ohlc.dropna().reset_index()
 
+# ─── MAIN DATA ─────────────────────────────────────────
 df_raw = fetch_data(coin_id)
 
 if df_raw.empty:
@@ -87,64 +92,89 @@ c1, c2 = st.columns(2)
 c1.metric("💰 Price", f"${latest['close']:.2f}", f"{pct:.2f}%")
 c2.metric("📊 Trend", "Bullish" if latest["close"] > latest["EMA20"] else "Bearish")
 
-# ─── LAYOUT: CHART + HEATMAP ───────────────────────────
-col1, col2 = st.columns([3, 1])
-
 # ─── CANDLESTICK CHART ─────────────────────────────────
-with col1:
-    st.subheader("📈 Candlestick Chart")
+st.subheader("📈 Candlestick Chart")
 
-    fig = go.Figure()
+fig = go.Figure()
 
-    fig.add_trace(go.Candlestick(
-        x=df["time"],
-        open=df["open"],
-        high=df["high"],
-        low=df["low"],
-        close=df["close"],
-        increasing_line_color="#00ff9f",
-        decreasing_line_color="#ff4d4d"
-    ))
+fig.add_trace(go.Candlestick(
+    x=df["time"],
+    open=df["open"],
+    high=df["high"],
+    low=df["low"],
+    close=df["close"],
+    increasing_line_color="#00ff9f",
+    decreasing_line_color="#ff4d4d"
+))
 
-    # EMA
-    fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], name="EMA20", line=dict(color="cyan")))
-    fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], name="EMA50", line=dict(color="orange")))
+# EMA
+fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], name="EMA20", line=dict(color="cyan")))
+fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], name="EMA50", line=dict(color="orange")))
 
-    # Bollinger Bands
-    fig.add_trace(go.Scatter(x=df["time"], y=df["Upper"], line=dict(color="gray", dash="dot")))
-    fig.add_trace(go.Scatter(x=df["time"], y=df["Lower"], fill='tonexty', line=dict(color="gray", dash="dot")))
+# Bollinger
+fig.add_trace(go.Scatter(x=df["time"], y=df["Upper"], line=dict(color="gray", dash="dot")))
+fig.add_trace(go.Scatter(x=df["time"], y=df["Lower"], fill='tonexty', line=dict(color="gray", dash="dot")))
 
-    fig.update_layout(
-        template="plotly_dark",
-        height=600,
-        xaxis_rangeslider_visible=False,
-        margin=dict(l=10, r=10, t=30, b=10)
-    )
+fig.update_layout(
+    template="plotly_dark",
+    height=600,
+    xaxis_rangeslider_visible=False
+)
 
-    st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, use_container_width=True)
 
-# ─── HEATMAP (FAKE ORDERBOOK STYLE) ────────────────────
-with col2:
-    st.subheader("🔥 Market Heatmap")
+# ─── COMPARISON CHART ──────────────────────────────────
+st.subheader("📊 Asset Comparison")
 
-    # Create simulated liquidity heatmap (since no orderbook API)
-    price_levels = np.linspace(df["low"].min(), df["high"].max(), 50)
-    intensity = np.random.rand(50)
+comp_fig = go.Figure()
 
-    heatmap = go.Figure(data=go.Heatmap(
-        z=intensity.reshape(-1, 1),
-        y=price_levels,
-        colorscale="Turbo"
-    ))
+# Add main coin
+main_prices = df_raw["price"] / df_raw["price"].iloc[0] * 100
+comp_fig.add_trace(go.Scatter(
+    x=df_raw.index,
+    y=main_prices,
+    name=selected_coin,
+    line=dict(width=3)
+))
 
-    heatmap.update_layout(
-        template="plotly_dark",
-        height=600,
-        margin=dict(l=10, r=10, t=30, b=10),
-        xaxis_showticklabels=False
-    )
+# Add comparison coins
+for coin in compare_coins:
+    coin_df = fetch_data(coins[coin])
+    if not coin_df.empty:
+        norm_price = coin_df["price"] / coin_df["price"].iloc[0] * 100
+        comp_fig.add_trace(go.Scatter(
+            x=coin_df.index,
+            y=norm_price,
+            name=coin
+        ))
 
-    st.plotly_chart(heatmap, use_container_width=True)
+comp_fig.update_layout(
+    template="plotly_dark",
+    height=400,
+    yaxis_title="Normalized Performance (%)"
+)
+
+st.plotly_chart(comp_fig, use_container_width=True)
+
+# ─── HEATMAP AT BOTTOM ─────────────────────────────────
+st.subheader("🔥 Market Heatmap")
+
+price_levels = np.linspace(df["low"].min(), df["high"].max(), 50)
+intensity = np.random.rand(50)
+
+heatmap = go.Figure(data=go.Heatmap(
+    z=intensity.reshape(-1, 1),
+    y=price_levels,
+    colorscale="Turbo"
+))
+
+heatmap.update_layout(
+    template="plotly_dark",
+    height=300,
+    xaxis_showticklabels=False
+)
+
+st.plotly_chart(heatmap, use_container_width=True)
 
 # ─── RAW DATA ──────────────────────────────────────────
 with st.expander("📁 View Raw Data"):

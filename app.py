@@ -1,6 +1,7 @@
 """
-Market Based Crypto Dashboard (Final Version)
+Market Based Crypto Dashboard (Final Clean Version)
 Features:
+- Binance + CoinGecko fallback (silent)
 - Multi-timeframe Candlestick Chart
 - EMA (20, 50)
 - Bollinger Bands
@@ -8,7 +9,6 @@ Features:
 - RSI
 - Buy/Sell Signals
 - Order Book Heatmap
-- Silent API fallback (no errors shown)
 """
 
 import streamlit as st
@@ -20,7 +20,6 @@ from plotly.subplots import make_subplots
 
 # ─── CONFIG ─────────────────────────────────────────────
 st.set_page_config(page_title="Market Based Crypto Dashboard", layout="wide", page_icon="📊")
-
 st.title("📊 Market Based Crypto Dashboard")
 
 # ─── SIDEBAR ────────────────────────────────────────────
@@ -28,10 +27,10 @@ with st.sidebar:
     st.header("⚙️ Settings")
 
     coins = {
-        "Bitcoin": "BTCUSDT",
-        "Ethereum": "ETHUSDT",
-        "BNB": "BNBUSDT",
-        "Solana": "SOLUSDT"
+        "Bitcoin": ("BTCUSDT", "bitcoin"),
+        "Ethereum": ("ETHUSDT", "ethereum"),
+        "BNB": ("BNBUSDT", "binancecoin"),
+        "Solana": ("SOLUSDT", "solana")
     }
 
     timeframes = {
@@ -45,17 +44,18 @@ with st.sidebar:
     selected_coin = st.selectbox("Select Asset", list(coins.keys()))
     selected_tf = st.selectbox("Select Timeframe", list(timeframes.keys()))
 
-    symbol = coins[selected_coin]
+    symbol, cg_id = coins[selected_coin]
     interval = timeframes[selected_tf]
 
     if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
 
-# ─── FETCH DATA (BINANCE + FALLBACK) ────────────────────
+# ─── DATA FETCH (BINANCE + FALLBACK) ────────────────────
 @st.cache_data(ttl=60)
-def fetch_data(symbol, interval):
+def fetch_data(symbol, interval, cg_id):
     headers = {"User-Agent": "Mozilla/5.0"}
 
+    # Try Binance
     try:
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit=200"
         res = requests.get(url, headers=headers, timeout=10)
@@ -76,8 +76,8 @@ def fetch_data(symbol, interval):
         return df
 
     except:
-        # Fallback → CoinGecko
-        url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=10"
+        # Silent fallback → CoinGecko
+        url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart?vs_currency=usd&days=10"
         res = requests.get(url, headers=headers)
         data = res.json()
 
@@ -95,11 +95,9 @@ def fetch_data(symbol, interval):
 
 # ─── ORDER BOOK ─────────────────────────────────────────
 def fetch_order_book(symbol):
-    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         url = f"https://api.binance.com/api/v3/depth?symbol={symbol}&limit=100"
-        res = requests.get(url, headers=headers, timeout=10)
-        data = res.json()
+        data = requests.get(url, timeout=5).json()
 
         bids = pd.DataFrame(data["bids"], columns=["price", "volume"], dtype=float)
         asks = pd.DataFrame(data["asks"], columns=["price", "volume"], dtype=float)
@@ -109,9 +107,9 @@ def fetch_order_book(symbol):
         return pd.DataFrame(), pd.DataFrame()
 
 # ─── LOAD DATA ─────────────────────────────────────────
-df = fetch_data(symbol, interval)
+df = fetch_data(symbol, interval, cg_id)
 
-if df.empty:
+if df.empty or len(df) < 2:
     st.error("No data available")
     st.stop()
 
@@ -119,7 +117,6 @@ if df.empty:
 df["EMA20"] = df["close"].ewm(span=20).mean()
 df["EMA50"] = df["close"].ewm(span=50).mean()
 
-# Bollinger Bands
 df["MA20"] = df["close"].rolling(20).mean()
 df["STD"] = df["close"].rolling(20).std()
 df["Upper"] = df["MA20"] + 2 * df["STD"]
@@ -129,7 +126,6 @@ df["Lower"] = df["MA20"] - 2 * df["STD"]
 delta = df["close"].diff()
 gain = delta.clip(lower=0)
 loss = -delta.clip(upper=0)
-
 rs = gain.rolling(14).mean() / loss.rolling(14).mean().replace(0, np.nan)
 df["RSI"] = 100 - (100 / (1 + rs))
 df["RSI"].fillna(50, inplace=True)
@@ -159,14 +155,10 @@ c2.metric("📈 RSI", f"{latest['RSI']:.2f}")
 c3.metric("📉 MACD", f"{latest['MACD']:.2f}")
 c4.metric("🎯 Signal", latest["Trade"])
 
-# ─── ADVANCED CHART ─────────────────────────────────────
+# ─── CHART ─────────────────────────────────────────────
 st.subheader("📊 Technical Analysis")
 
-fig = make_subplots(
-    rows=2, cols=1,
-    shared_xaxes=True,
-    row_heights=[0.7, 0.3]
-)
+fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
 
 # Candlestick
 fig.add_trace(go.Candlestick(
@@ -183,22 +175,20 @@ fig.add_trace(go.Candlestick(
 fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], line=dict(color="blue"), name="EMA20"), row=1, col=1)
 fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], line=dict(color="orange"), name="EMA50"), row=1, col=1)
 
-# Bollinger Bands
-fig.add_trace(go.Scatter(x=df["time"], y=df["Upper"], line=dict(dash="dot", color="gray"), name="BB Upper"), row=1, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["Lower"], line=dict(dash="dot", color="gray"), fill='tonexty'), row=1, col=1)
+# Bollinger
+fig.add_trace(go.Scatter(x=df["time"], y=df["Upper"], line=dict(dash="dot", color="gray")), row=1, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["Lower"], fill='tonexty', line=dict(dash="dot", color="gray")), row=1, col=1)
 
-# MACD Histogram
+# MACD
 colors = np.where(df["MACD_Hist"] >= 0, "green", "red")
 fig.add_trace(go.Bar(x=df["time"], y=df["MACD_Hist"], marker_color=colors), row=2, col=1)
-
-# MACD lines
-fig.add_trace(go.Scatter(x=df["time"], y=df["MACD"], line=dict(color="blue"), name="MACD"), row=2, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["Signal"], line=dict(color="orange"), name="Signal"), row=2, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["MACD"], line=dict(color="blue")), row=2, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["Signal"], line=dict(color="orange")), row=2, col=1)
 
 fig.update_layout(template="plotly_dark", height=750, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)
 
-# ─── ORDER BOOK HEATMAP ────────────────────────────────
+# ─── ORDER BOOK ────────────────────────────────────────
 st.subheader("📊 Order Book Heatmap")
 
 bids, asks = fetch_order_book(symbol)
@@ -218,4 +208,4 @@ if not bids.empty:
     heatmap.update_layout(template="plotly_dark", height=400)
     st.plotly_chart(heatmap, use_container_width=True)
 else:
-    st.warning("Order book unavailable")
+    st.info("Order book unavailable (API restricted)")

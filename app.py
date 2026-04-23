@@ -6,8 +6,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # ─── CONFIG ─────────────────────────────────────────────
-st.set_page_config(page_title="Crypto Dashboard", layout="wide", page_icon="📊")
-st.title("📊 Market Based Crypto Dashboard")
+st.set_page_config(page_title="Crypto Dashboard Pro", layout="wide", page_icon="📊")
+st.title("📊 Market Based Crypto Dashboard (Pro)")
 
 # ─── SIDEBAR ────────────────────────────────────────────
 with st.sidebar:
@@ -48,36 +48,25 @@ def fetch_data(coin_id):
         return pd.DataFrame()
 
     data = res.json()
-
     df = pd.DataFrame(data["prices"], columns=["time", "price"])
     df["time"] = pd.to_datetime(df["time"], unit="ms")
     df.set_index("time", inplace=True)
 
     return df
 
-# ─── RESAMPLE FUNCTION ──────────────────────────────────
+# ─── RESAMPLE ──────────────────────────────────────────
 def resample_df(df, timeframe):
-    try:
-        ohlc = df["price"].resample(timeframe).ohlc()
-        ohlc["volume"] = 0
-        ohlc = ohlc.dropna().reset_index()
-        return ohlc
-    except Exception as e:
-        st.error(f"Resample Error: {e}")
-        return pd.DataFrame()
+    ohlc = df["price"].resample(timeframe).ohlc()
+    ohlc["volume"] = 0
+    return ohlc.dropna().reset_index()
 
-# ─── LOAD DATA ─────────────────────────────────────────
 df_raw = fetch_data(coin_id)
 
 if df_raw.empty:
-    st.error("❌ Failed to fetch data from CoinGecko")
+    st.error("Failed to fetch data")
     st.stop()
 
 df = resample_df(df_raw, tf)
-
-if df.empty:
-    st.error("❌ Resampling failed")
-    st.stop()
 
 # ─── INDICATORS ─────────────────────────────────────────
 df["EMA20"] = df["close"].ewm(span=20).mean()
@@ -88,74 +77,75 @@ df["STD"] = df["close"].rolling(20).std()
 df["Upper"] = df["MA20"] + 2 * df["STD"]
 df["Lower"] = df["MA20"] - 2 * df["STD"]
 
-# RSI
-delta = df["close"].diff()
-gain = delta.clip(lower=0)
-loss = -delta.clip(upper=0)
-rs = gain.rolling(14).mean() / loss.rolling(14).mean().replace(0, np.nan)
-df["RSI"] = 100 - (100 / (1 + rs))
-df["RSI"] = df["RSI"].fillna(50)
-
-# MACD
-ema12 = df["close"].ewm(span=12).mean()
-ema26 = df["close"].ewm(span=26).mean()
-df["MACD"] = ema12 - ema26
-df["Signal"] = df["MACD"].ewm(span=9).mean()
-df["MACD_Hist"] = df["MACD"] - df["Signal"]
-
-# Signals
-df["Trade"] = "HOLD"
-df.loc[(df["RSI"] < 30) & (df["MACD"] > df["Signal"]), "Trade"] = "BUY"
-df.loc[(df["RSI"] > 70) & (df["MACD"] < df["Signal"]), "Trade"] = "SELL"
-
 # ─── METRICS ───────────────────────────────────────────
 latest = df.iloc[-1]
 prev = df.iloc[-2]
 
-change = latest["close"] - prev["close"]
-pct = (change / prev["close"]) * 100
+pct = ((latest["close"] - prev["close"]) / prev["close"]) * 100
 
-c1, c2, c3, c4 = st.columns(4)
-
+c1, c2 = st.columns(2)
 c1.metric("💰 Price", f"${latest['close']:.2f}", f"{pct:.2f}%")
-c2.metric("📈 RSI", f"{latest['RSI']:.2f}")
-c3.metric("📉 MACD", f"{latest['MACD']:.2f}")
-c4.metric("🎯 Signal", latest["Trade"])
+c2.metric("📊 Trend", "Bullish" if latest["close"] > latest["EMA20"] else "Bearish")
 
-# ─── CHART ─────────────────────────────────────────────
-st.subheader("📊 Technical Analysis")
+# ─── LAYOUT: CHART + HEATMAP ───────────────────────────
+col1, col2 = st.columns([3, 1])
 
-fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
+# ─── CANDLESTICK CHART ─────────────────────────────────
+with col1:
+    st.subheader("📈 Candlestick Chart")
 
-# Candlestick
-fig.add_trace(go.Candlestick(
-    x=df["time"],
-    open=df["open"],
-    high=df["high"],
-    low=df["low"],
-    close=df["close"],
-    increasing_line_color="#00e676",
-    decreasing_line_color="#ff5252"
-), row=1, col=1)
+    fig = go.Figure()
 
-# EMA
-fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], name="EMA20", line=dict(color="cyan")), row=1, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], name="EMA50", line=dict(color="orange")), row=1, col=1)
+    fig.add_trace(go.Candlestick(
+        x=df["time"],
+        open=df["open"],
+        high=df["high"],
+        low=df["low"],
+        close=df["close"],
+        increasing_line_color="#00ff9f",
+        decreasing_line_color="#ff4d4d"
+    ))
 
-# Bollinger Bands
-fig.add_trace(go.Scatter(x=df["time"], y=df["Upper"], line=dict(color="gray", dash="dot")), row=1, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["Lower"], fill='tonexty', line=dict(color="gray", dash="dot")), row=1, col=1)
+    # EMA
+    fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], name="EMA20", line=dict(color="cyan")))
+    fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], name="EMA50", line=dict(color="orange")))
 
-# MACD
-colors = np.where(df["MACD_Hist"] >= 0, "green", "red")
-fig.add_trace(go.Bar(x=df["time"], y=df["MACD_Hist"], marker_color=colors), row=2, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["MACD"], line=dict(color="blue")), row=2, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["Signal"], line=dict(color="orange")), row=2, col=1)
+    # Bollinger Bands
+    fig.add_trace(go.Scatter(x=df["time"], y=df["Upper"], line=dict(color="gray", dash="dot")))
+    fig.add_trace(go.Scatter(x=df["time"], y=df["Lower"], fill='tonexty', line=dict(color="gray", dash="dot")))
 
-fig.update_layout(template="plotly_dark", height=750, xaxis_rangeslider_visible=False)
+    fig.update_layout(
+        template="plotly_dark",
+        height=600,
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=10, r=10, t=30, b=10)
+    )
 
-st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)
+
+# ─── HEATMAP (FAKE ORDERBOOK STYLE) ────────────────────
+with col2:
+    st.subheader("🔥 Market Heatmap")
+
+    # Create simulated liquidity heatmap (since no orderbook API)
+    price_levels = np.linspace(df["low"].min(), df["high"].max(), 50)
+    intensity = np.random.rand(50)
+
+    heatmap = go.Figure(data=go.Heatmap(
+        z=intensity.reshape(-1, 1),
+        y=price_levels,
+        colorscale="Turbo"
+    ))
+
+    heatmap.update_layout(
+        template="plotly_dark",
+        height=600,
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis_showticklabels=False
+    )
+
+    st.plotly_chart(heatmap, use_container_width=True)
 
 # ─── RAW DATA ──────────────────────────────────────────
-with st.expander("📁 View Raw Data & Trade Signals"):
-    st.dataframe(df.sort_values("time", ascending=False), use_container_width=True, hide_index=True)
+with st.expander("📁 View Raw Data"):
+    st.dataframe(df.sort_values("time", ascending=False), use_container_width=True)

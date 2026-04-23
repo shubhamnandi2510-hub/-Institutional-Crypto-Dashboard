@@ -23,39 +23,55 @@ with st.sidebar:
 def fetch_top_coins(currency):
     url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency={currency}&order=market_cap_desc&per_page=10&page=1"
     
-    res = requests.get(url, timeout=10)
-    data = res.json()
+    try:
+        res = requests.get(url, timeout=10)
+        res.raise_for_status()
+        data = res.json()
 
-    df = pd.DataFrame([{
-        "name": c["name"],
-        "symbol": c["symbol"].upper(),
-        "price": c["current_price"],
-        "change": c["price_change_percentage_24h"],
-        "market_cap": c["market_cap"],
-        "id": c["id"]
-    } for c in data])
+        if not isinstance(data, list):
+            return pd.DataFrame()
 
-    return df
+        df = pd.DataFrame([{
+            "name": c.get("name"),
+            "symbol": c.get("symbol", "").upper(),
+            "price": c.get("current_price"),
+            "change": c.get("price_change_percentage_24h"),
+            "market_cap": c.get("market_cap"),
+            "id": c.get("id")
+        } for c in data])
+
+        return df
+
+    except Exception:
+        return pd.DataFrame()
 
 # ─── FETCH PRICE HISTORY ─────────────────────────────────
 @st.cache_data(ttl=60)
 def fetch_price_history(coin_id, currency):
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency={currency}&days=10"
-    
-    res = requests.get(url, timeout=10)
-    data = res.json()
 
-    df = pd.DataFrame(data["prices"], columns=["time", "price"])
-    df["time"] = pd.to_datetime(df["time"], unit="ms")
-    df.set_index("time", inplace=True)
+    try:
+        res = requests.get(url, timeout=10)
+        res.raise_for_status()
+        data = res.json()
 
-    return df
+        if "prices" not in data:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data["prices"], columns=["time", "price"])
+        df["time"] = pd.to_datetime(df["time"], unit="ms")
+        df.set_index("time", inplace=True)
+
+        return df
+
+    except Exception:
+        return pd.DataFrame()
 
 # ─── LOAD DATA ──────────────────────────────────────────
 df_top = fetch_top_coins(currency)
 
 if df_top.empty:
-    st.error("No data available")
+    st.error("⚠️ Unable to fetch crypto data. Please try again later.")
     st.stop()
 
 # ─── TOP 10 TABLE ───────────────────────────────────────
@@ -76,10 +92,19 @@ coin_id = df_top[df_top["name"] == selected_coin]["id"].values[0]
 # ─── FETCH HISTORY ──────────────────────────────────────
 df_price = fetch_price_history(coin_id, currency)
 
-# Convert to OHLC (fixed timeframe issue)
-ohlc = df_price["price"].resample("1H").ohlc().dropna()
+if df_price.empty or "price" not in df_price:
+    st.error("⚠️ Price data unavailable")
+    st.stop()
+
+# ─── RESAMPLE SAFE ──────────────────────────────────────
+ohlc = df_price["price"].resample("1h").ohlc().dropna()
 
 df = ohlc.reset_index()
+
+# ─── CHECK DATA LENGTH ─────────────────────────────────
+if len(df) < 2:
+    st.warning("Not enough data to calculate indicators")
+    st.stop()
 
 # ─── INDICATORS ─────────────────────────────────────────
 df["EMA20"] = df["close"].ewm(span=20).mean()

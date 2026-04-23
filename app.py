@@ -9,55 +9,22 @@ from plotly.subplots import make_subplots
 st.set_page_config(page_title="Market Based Crypto Dashboard", layout="wide", page_icon="📊")
 st.title("📊 Market Based Crypto Dashboard")
 
-# 👉 ADD YOUR CoinMarketCap API Key here
-CMC_API_KEY = "YOUR_API_KEY"
-
-# ─── SIDEBAR ────────────────────────────────────────────
-with st.sidebar:
-    st.header("⚙️ Settings")
-
-    coins = {
-        "Bitcoin": ("BTC", "bitcoin"),
-        "Ethereum": ("ETH", "ethereum"),
-        "BNB": ("BNB", "binancecoin"),
-        "Solana": ("SOL", "solana")
-    }
-
-    timeframes = {
-        "5 Min": "5T",
-        "15 Min": "15T",
-        "1 Hour": "1H",
-        "4 Hour": "4H",
-        "1 Day": "1D"
-    }
-
-    selected_coin = st.selectbox("Select Asset", list(coins.keys()))
-    selected_tf = st.selectbox("Select Timeframe", list(timeframes.keys()))
-
-    symbol, coingecko_id = coins[selected_coin]
-    tf = timeframes[selected_tf]
-
-    if st.button("🔄 Refresh"):
-        st.cache_data.clear()
-
-# ─── FETCH CoinMarketCap DATA ───────────────────────────
+# ─── FETCH TOP COINS (CoinGecko) ────────────────────────
 @st.cache_data(ttl=60)
-def fetch_cmc_data():
-    url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
-    headers = {
-        "Accepts": "application/json",
-        "X-CMC_PRO_API_KEY": CMC_API_KEY
-    }
-
+def fetch_data():
+    url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1"
+    
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-        data = res.json()["data"]
+        res = requests.get(url, timeout=10)
+        data = res.json()
 
         df = pd.DataFrame([{
-            "symbol": c["symbol"],
-            "price": c["quote"]["USD"]["price"],
-            "change": c["quote"]["USD"]["percent_change_24h"],
-            "market_cap": c["quote"]["USD"]["market_cap"]
+            "name": c["name"],
+            "symbol": c["symbol"].upper(),
+            "price": c["current_price"],
+            "change": c["price_change_percentage_24h"],
+            "market_cap": c["market_cap"],
+            "id": c["id"]
         } for c in data])
 
         return df
@@ -65,9 +32,9 @@ def fetch_cmc_data():
     except:
         return pd.DataFrame()
 
-# ─── FETCH CoinGecko OHLC ───────────────────────────────
+# ─── FETCH HISTORICAL DATA ─────────────────────────────
 @st.cache_data(ttl=60)
-def fetch_ohlc(coin_id):
+def fetch_history(coin_id):
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=10"
     res = requests.get(url, timeout=10)
     data = res.json()
@@ -78,22 +45,35 @@ def fetch_ohlc(coin_id):
 
     return df
 
-def resample_ohlc(df, timeframe):
+# ─── RESAMPLE FOR TIMEFRAME ─────────────────────────────
+def resample_df(df, timeframe):
     ohlc = df["price"].resample(timeframe).ohlc()
     ohlc["volume"] = 0
     ohlc.dropna(inplace=True)
     return ohlc.reset_index()
 
 # ─── LOAD DATA ─────────────────────────────────────────
-cmc_df = fetch_cmc_data()
-if cmc_df.empty:
-    st.error("❌ CoinMarketCap API failed. Check API key.")
+coins_df = fetch_data()
+
+if coins_df.empty:
+    st.error("❌ Failed to fetch data from CoinGecko")
     st.stop()
 
-coin_data = cmc_df[cmc_df["symbol"] == symbol].iloc[0]
+# ─── SIDEBAR ────────────────────────────────────────────
+with st.sidebar:
+    st.header("⚙️ Controls")
 
-df_raw = fetch_ohlc(coingecko_id)
-df = resample_ohlc(df_raw, tf)
+    selected_coin = st.selectbox("Select Coin", coins_df["name"])
+    timeframe = st.selectbox("Timeframe", ["5T", "15T", "1H", "4H", "1D"])
+
+    if st.button("🔄 Refresh"):
+        st.cache_data.clear()
+
+coin = coins_df[coins_df["name"] == selected_coin].iloc[0]
+
+# ─── FETCH PRICE HISTORY ───────────────────────────────
+df_raw = fetch_history(coin["id"])
+df = resample_df(df_raw, timeframe)
 
 if len(df) < 20:
     st.warning("Not enough data")
@@ -131,9 +111,9 @@ df.loc[(df["RSI"] > 70) & (df["MACD"] < df["Signal"]), "Trade"] = "SELL"
 # ─── METRICS ───────────────────────────────────────────
 c1, c2, c3, c4 = st.columns(4)
 
-c1.metric("💰 Price", f"${coin_data['price']:.2f}")
-c2.metric("📈 24h Change", f"{coin_data['change']:.2f}%")
-c3.metric("🏦 Market Cap", f"${coin_data['market_cap']:.0f}")
+c1.metric("💰 Price", f"${coin['price']:.2f}")
+c2.metric("📈 24h Change", f"{coin['change']:.2f}%")
+c3.metric("🏦 Market Cap", f"${coin['market_cap']:.0f}")
 c4.metric("🎯 Signal", df.iloc[-1]["Trade"])
 
 # ─── CHART ─────────────────────────────────────────────
@@ -153,14 +133,14 @@ fig.add_trace(go.Candlestick(
 ), row=1, col=1)
 
 # EMA
-fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], line=dict(color="cyan"), name="EMA20"), row=1, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], line=dict(color="orange"), name="EMA50"), row=1, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], line=dict(color="cyan")), row=1, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], line=dict(color="orange")), row=1, col=1)
 
 # Bollinger
 fig.add_trace(go.Scatter(x=df["time"], y=df["Upper"], line=dict(color="gray", dash="dot")), row=1, col=1)
 fig.add_trace(go.Scatter(x=df["time"], y=df["Lower"], fill='tonexty', line=dict(color="gray", dash="dot")), row=1, col=1)
 
-# BUY / SELL markers
+# Buy/Sell markers
 buy = df[df["Trade"] == "BUY"]
 sell = df[df["Trade"] == "SELL"]
 

@@ -1,13 +1,14 @@
 """
-Market Based Crypto Dashboard (CoinGecko Only)
+Market Based Crypto Dashboard (Multi-Timeframe)
 
 Features:
-- Candlestick-style chart (approximated from price data)
+- Multi-timeframe (1m, 5m, 15m, 1h, 4h, 1d)
+- Candlestick Chart
 - EMA (20, 50)
 - Bollinger Bands
 - RSI, MACD
 - Buy/Sell Signals
-- Liquidity-style Heatmap (simulated)
+- Raw Data Table
 """
 
 import streamlit as st
@@ -32,34 +33,46 @@ with st.sidebar:
         "Solana": "solana"
     }
 
+    timeframes = {
+        "1 Minute": "1T",
+        "5 Minutes": "5T",
+        "15 Minutes": "15T",
+        "1 Hour": "1H",
+        "4 Hours": "4H",
+        "1 Day": "1D"
+    }
+
     selected_coin = st.selectbox("Select Asset", list(coins.keys()))
+    selected_tf = st.selectbox("Select Timeframe", list(timeframes.keys()))
+
     coin_id = coins[selected_coin]
+    tf = timeframes[selected_tf]
 
     if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
 
-# ─── FETCH DATA FROM COINGECKO ─────────────────────────
+# ─── FETCH DATA ─────────────────────────────────────────
 @st.cache_data(ttl=60)
 def fetch_data(coin_id):
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=10"
     res = requests.get(url, timeout=10)
     data = res.json()
 
-    prices = data["prices"]
-
-    df = pd.DataFrame(prices, columns=["time", "price"])
+    df = pd.DataFrame(data["prices"], columns=["time", "price"])
     df["time"] = pd.to_datetime(df["time"], unit="ms")
-
-    # Simulate OHLC
-    df["open"] = df["price"]
-    df["high"] = df["price"]
-    df["low"] = df["price"]
-    df["close"] = df["price"]
-    df["volume"] = 0
+    df.set_index("time", inplace=True)
 
     return df
 
-df = fetch_data(coin_id)
+# ─── RESAMPLE TO TIMEFRAME ─────────────────────────────
+def resample_df(df, timeframe):
+    ohlc = df["price"].resample(timeframe).ohlc()
+    ohlc["volume"] = 0
+    ohlc.dropna(inplace=True)
+    return ohlc.reset_index()
+
+df_raw = fetch_data(coin_id)
+df = resample_df(df_raw, tf)
 
 if df.empty:
     st.error("No data available")
@@ -112,7 +125,7 @@ st.subheader("📊 Technical Analysis")
 
 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
 
-# Candlestick (simulated)
+# Candlestick
 fig.add_trace(go.Candlestick(
     x=df["time"],
     open=df["open"],
@@ -127,7 +140,7 @@ fig.add_trace(go.Candlestick(
 fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], name="EMA20", line=dict(color="cyan")), row=1, col=1)
 fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], name="EMA50", line=dict(color="orange")), row=1, col=1)
 
-# Bollinger Bands
+# Bollinger
 fig.add_trace(go.Scatter(x=df["time"], y=df["Upper"], line=dict(color="gray", dash="dot")), row=1, col=1)
 fig.add_trace(go.Scatter(x=df["time"], y=df["Lower"], fill='tonexty', line=dict(color="gray", dash="dot")), row=1, col=1)
 
@@ -140,24 +153,10 @@ fig.add_trace(go.Scatter(x=df["time"], y=df["Signal"], line=dict(color="orange")
 fig.update_layout(template="plotly_dark", height=750, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)
 
-# ─── SIMULATED HEATMAP ────────────────────────────────
-st.subheader("🔥 Liquidity Heatmap (Simulated)")
-
-heat_df = df.copy()
-heat_df["intensity"] = np.random.rand(len(heat_df))
-
-heatmap = go.Figure()
-heatmap.add_trace(go.Scatter(
-    x=heat_df["time"],
-    y=heat_df["close"],
-    mode="markers",
-    marker=dict(
-        size=heat_df["intensity"] * 20,
-        color=heat_df["intensity"],
-        colorscale="Turbo",
-        showscale=True
+# ─── RAW DATA + SIGNALS ────────────────────────────────
+with st.expander("📁 View Raw Data & Trade Signals", expanded=False):
+    st.dataframe(
+        df.sort_values("time", ascending=False),
+        use_container_width=True,
+        hide_index=True
     )
-))
-
-heatmap.update_layout(template="plotly_dark", height=400)
-st.plotly_chart(heatmap, use_container_width=True)

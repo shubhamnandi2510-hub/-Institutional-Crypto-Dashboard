@@ -3,11 +3,10 @@ import pandas as pd
 import numpy as np
 import requests
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 # ─── CONFIG ─────────────────────────────────────────────
-st.set_page_config(page_title="Crypto Dashboard", layout="wide", page_icon="📊")
-st.title("📊 Market Based Crypto Dashboard")
+st.set_page_config(page_title="Crypto Candlestick Dashboard", layout="wide", page_icon="📊")
+st.title("📊 Crypto Candlestick Dashboard")
 
 # ─── SIDEBAR ────────────────────────────────────────────
 with st.sidebar:
@@ -18,13 +17,12 @@ with st.sidebar:
     timeframe_map = {
         "1 Minute": "1min",
         "15 Minutes": "15min",
-        "1 Hour": "1h",
-        "4 Hours": "4h",
-        "1 Day": "1d"
+        "1 Hour": "hourly",
+        "4 Hours": "hourly",
+        "1 Day": "daily"
     }
 
-    selected_tf_label = st.selectbox("Select Timeframe", list(timeframe_map.keys()))
-    selected_tf = timeframe_map[selected_tf_label]
+    selected_tf = st.selectbox("Select Timeframe", list(timeframe_map.keys()))
 
     if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
@@ -36,131 +34,89 @@ def fetch_top_coins(currency):
     
     try:
         res = requests.get(url, timeout=10)
-        res.raise_for_status()
         data = res.json()
 
-        if not isinstance(data, list):
-            return pd.DataFrame()
-
         df = pd.DataFrame([{
-            "name": c.get("name"),
-            "symbol": c.get("symbol", "").upper(),
-            "price": c.get("current_price"),
-            "change": c.get("price_change_percentage_24h"),
-            "market_cap": c.get("market_cap"),
-            "id": c.get("id")
+            "name": c["name"],
+            "symbol": c["symbol"].upper(),
+            "price": c["current_price"],
+            "change": c["price_change_percentage_24h"],
+            "market_cap": c["market_cap"],
+            "id": c["id"]
         } for c in data])
 
         return df
-
     except:
         return pd.DataFrame()
 
-# ─── FETCH PRICE HISTORY ─────────────────────────────────
+# ─── FETCH PRICE DATA ───────────────────────────────────
 @st.cache_data(ttl=60)
 def fetch_price_history(coin_id, currency):
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency={currency}&days=10"
+    
+    res = requests.get(url, timeout=10)
+    data = res.json()
 
-    try:
-        res = requests.get(url, timeout=10)
-        res.raise_for_status()
-        data = res.json()
+    df = pd.DataFrame(data["prices"], columns=["time", "price"])
+    df["time"] = pd.to_datetime(df["time"], unit="ms")
+    df.set_index("time", inplace=True)
 
-        if "prices" not in data:
-            return pd.DataFrame()
+    return df
 
-        df = pd.DataFrame(data["prices"], columns=["time", "price"])
-        df["time"] = pd.to_datetime(df["time"], unit="ms")
-        df.set_index("time", inplace=True)
+# ─── RESAMPLE (FIXED FOR ALL TIMEFRAMES) ────────────────
+def resample_df(df, tf):
+    tf_map = {
+        "1 Minute": "1T",
+        "15 Minutes": "15T",
+        "1 Hour": "1H",
+        "4 Hours": "4H",
+        "1 Day": "1D"
+    }
 
-        return df
+    freq = tf_map[tf]
 
-    except:
-        return pd.DataFrame()
+    ohlc = df["price"].resample(freq).ohlc().dropna()
+    return ohlc.reset_index()
 
 # ─── LOAD DATA ──────────────────────────────────────────
 df_top = fetch_top_coins(currency)
 
 if df_top.empty:
-    st.error("⚠️ Unable to fetch crypto data")
+    st.error("⚠️ Failed to fetch data. Try again.")
     st.stop()
 
-# ─── TOP TABLE ──────────────────────────────────────────
+# ─── TOP 10 TABLE ───────────────────────────────────────
 st.subheader("🏆 Top 10 Cryptocurrencies")
-
-df_display = df_top.copy()
-df_display["price"] = df_display["price"].map(lambda x: f"{x:,.2f}")
-df_display["change"] = df_display["change"].map(lambda x: f"{x:+.2f}%")
-
-st.dataframe(df_display, use_container_width=True, hide_index=True)
+st.dataframe(df_top, use_container_width=True, hide_index=True)
 
 # ─── SELECT COIN ────────────────────────────────────────
-selected_coin = st.selectbox("Select Coin", df_top["name"])
-coin_id = df_top[df_top["name"] == selected_coin]["id"].values[0]
+coin = st.selectbox("Select Coin", df_top["name"])
+coin_id = df_top[df_top["name"] == coin]["id"].values[0]
 
-# ─── FETCH HISTORY ──────────────────────────────────────
+# ─── FETCH + RESAMPLE ───────────────────────────────────
 df_price = fetch_price_history(coin_id, currency)
+df = resample_df(df_price, selected_tf)
 
-if df_price.empty:
-    st.error("Price data unavailable")
+if df.empty:
+    st.error("No data available for selected timeframe.")
     st.stop()
 
-# ─── RESAMPLE (MULTI-TIMEFRAME) ─────────────────────────
-try:
-    ohlc = df_price["price"].resample(selected_tf).ohlc().dropna()
-except Exception:
-    st.error("Invalid timeframe selection")
-    st.stop()
-
-df = ohlc.reset_index()
-
-if len(df) < 2:
-    st.warning("Not enough data")
-    st.stop()
-
-# ─── INDICATORS ─────────────────────────────────────────
-df["EMA20"] = df["close"].ewm(span=20).mean()
-df["EMA50"] = df["close"].ewm(span=50).mean()
-
-# RSI
-delta = df["close"].diff()
-gain = delta.clip(lower=0)
-loss = -delta.clip(upper=0)
-rs = gain.rolling(14).mean() / loss.rolling(14).mean().replace(0, np.nan)
-df["RSI"] = 100 - (100 / (1 + rs))
-df["RSI"].fillna(50, inplace=True)
-
-# MACD
-ema12 = df["close"].ewm(span=12).mean()
-ema26 = df["close"].ewm(span=26).mean()
-df["MACD"] = ema12 - ema26
-df["Signal"] = df["MACD"].ewm(span=9).mean()
-df["MACD_Hist"] = df["MACD"] - df["Signal"]
-
-# Signals
-df["Trade"] = "HOLD"
-df.loc[(df["RSI"] < 30) & (df["MACD"] > df["Signal"]), "Trade"] = "BUY"
-df.loc[(df["RSI"] > 70) & (df["MACD"] < df["Signal"]), "Trade"] = "SELL"
-
-# ─── METRICS ───────────────────────────────────────────
+# ─── METRICS ────────────────────────────────────────────
 latest = df.iloc[-1]
 prev = df.iloc[-2]
 
 change = latest["close"] - prev["close"]
 pct = (change / prev["close"]) * 100
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2 = st.columns(2)
 c1.metric("💰 Price", f"{latest['close']:.2f}", f"{pct:.2f}%")
-c2.metric("📈 RSI", f"{latest['RSI']:.2f}")
-c3.metric("📉 MACD", f"{latest['MACD']:.2f}")
-c4.metric("🎯 Signal", latest["Trade"])
+c2.metric("📊 Timeframe", selected_tf)
 
-# ─── CHART ─────────────────────────────────────────────
-st.subheader(f"📊 Candlestick Chart ({selected_tf_label})")
+# ─── CANDLESTICK CHART ─────────────────────────────────
+st.subheader("📊 Candlestick Chart")
 
-fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
+fig = go.Figure()
 
-# Candlestick
 fig.add_trace(go.Candlestick(
     x=df["time"],
     open=df["open"],
@@ -169,36 +125,16 @@ fig.add_trace(go.Candlestick(
     close=df["close"],
     increasing_line_color="#00e676",
     decreasing_line_color="#ff5252"
-), row=1, col=1)
-
-# EMA
-fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], line=dict(color="cyan")), row=1, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], line=dict(color="orange")), row=1, col=1)
-
-# MACD
-colors = np.where(df["MACD_Hist"] >= 0, "green", "red")
-fig.add_trace(go.Bar(x=df["time"], y=df["MACD_Hist"], marker_color=colors), row=2, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["MACD"], line=dict(color="blue")), row=2, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["Signal"], line=dict(color="orange")), row=2, col=1)
-
-fig.update_layout(template="plotly_dark", height=700, xaxis_rangeslider_visible=False)
-st.plotly_chart(fig, use_container_width=True)
-
-# ─── HEATMAP ───────────────────────────────────────────
-st.subheader("🔥 Market Heatmap")
-
-heatmap_data = df_top[["name", "change"]].fillna(0)
-
-fig_heat = go.Figure(data=go.Heatmap(
-    z=[heatmap_data["change"]],
-    x=heatmap_data["name"],
-    y=["24h % Change"],
-    colorscale="RdYlGn"
 ))
 
-fig_heat.update_layout(template="plotly_dark", height=250)
-st.plotly_chart(fig_heat, use_container_width=True)
+fig.update_layout(
+    template="plotly_dark",
+    height=700,
+    xaxis_rangeslider_visible=False
+)
+
+st.plotly_chart(fig, use_container_width=True)
 
 # ─── RAW DATA ──────────────────────────────────────────
-with st.expander("📁 View Raw Data & Trade Signals"):
-    st.dataframe(df.sort_values("time", ascending=False), use_container_width=True)
+with st.expander("📁 View Raw Data"):
+    st.dataframe(df.sort_values("time", ascending=False), use_container_width=True, hide_index=True)

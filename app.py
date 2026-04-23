@@ -1,5 +1,14 @@
 """
-Institutional Crypto Dashboard (Final Stable Version)
+Market Based Crypto Dashboard (Final Version)
+Features:
+- Multi-timeframe Candlestick Chart
+- EMA (20, 50)
+- Bollinger Bands
+- MACD + Histogram
+- RSI
+- Buy/Sell Signals
+- Order Book Heatmap
+- Silent API fallback (no errors shown)
 """
 
 import streamlit as st
@@ -10,9 +19,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # ─── CONFIG ─────────────────────────────────────────────
-st.set_page_config(page_title="Institutional Crypto Dashboard", layout="wide", page_icon="🏦")
+st.set_page_config(page_title="Market Based Crypto Dashboard", layout="wide", page_icon="📊")
 
-st.title("🏦 Institutional Crypto Dashboard")
+st.title("📊 Market Based Crypto Dashboard")
 
 # ─── SIDEBAR ────────────────────────────────────────────
 with st.sidebar:
@@ -22,10 +31,7 @@ with st.sidebar:
         "Bitcoin": "BTCUSDT",
         "Ethereum": "ETHUSDT",
         "BNB": "BNBUSDT",
-        "XRP": "XRPUSDT",
-        "Solana": "SOLUSDT",
-        "Cardano": "ADAUSDT",
-        "Dogecoin": "DOGEUSDT"
+        "Solana": "SOLUSDT"
     }
 
     timeframes = {
@@ -45,7 +51,7 @@ with st.sidebar:
     if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
 
-# ─── FETCH DATA (FIXED + FALLBACK) ─────────────────────
+# ─── FETCH DATA (BINANCE + FALLBACK) ────────────────────
 @st.cache_data(ttl=60)
 def fetch_data(symbol, interval):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -70,7 +76,7 @@ def fetch_data(symbol, interval):
         return df
 
     except:
-        # Silent fallback (CoinGecko)
+        # Fallback → CoinGecko
         url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=10"
         res = requests.get(url, headers=headers)
         data = res.json()
@@ -87,7 +93,7 @@ def fetch_data(symbol, interval):
 
         return df
 
-# ─── ORDER BOOK ────────────────────────────────────────
+# ─── ORDER BOOK ─────────────────────────────────────────
 def fetch_order_book(symbol):
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -113,15 +119,18 @@ if df.empty:
 df["EMA20"] = df["close"].ewm(span=20).mean()
 df["EMA50"] = df["close"].ewm(span=50).mean()
 
-# RSI FIXED
+# Bollinger Bands
+df["MA20"] = df["close"].rolling(20).mean()
+df["STD"] = df["close"].rolling(20).std()
+df["Upper"] = df["MA20"] + 2 * df["STD"]
+df["Lower"] = df["MA20"] - 2 * df["STD"]
+
+# RSI
 delta = df["close"].diff()
 gain = delta.clip(lower=0)
 loss = -delta.clip(upper=0)
 
-avg_gain = gain.rolling(14).mean()
-avg_loss = loss.rolling(14).mean()
-
-rs = avg_gain / avg_loss.replace(0, np.nan)
+rs = gain.rolling(14).mean() / loss.rolling(14).mean().replace(0, np.nan)
 df["RSI"] = 100 - (100 / (1 + rs))
 df["RSI"].fillna(50, inplace=True)
 
@@ -150,25 +159,43 @@ c2.metric("📈 RSI", f"{latest['RSI']:.2f}")
 c3.metric("📉 MACD", f"{latest['MACD']:.2f}")
 c4.metric("🎯 Signal", latest["Trade"])
 
-# ─── CHART ─────────────────────────────────────────────
-fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
-                    row_heights=[0.6, 0.2, 0.2])
+# ─── ADVANCED CHART ─────────────────────────────────────
+st.subheader("📊 Technical Analysis")
 
+fig = make_subplots(
+    rows=2, cols=1,
+    shared_xaxes=True,
+    row_heights=[0.7, 0.3]
+)
+
+# Candlestick
 fig.add_trace(go.Candlestick(
-    x=df["time"], open=df["open"], high=df["high"],
-    low=df["low"], close=df["close"]
+    x=df["time"],
+    open=df["open"],
+    high=df["high"],
+    low=df["low"],
+    close=df["close"],
+    increasing_line_color="#00c853",
+    decreasing_line_color="#ff1744"
 ), row=1, col=1)
 
-fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], name="EMA20"), row=1, col=1)
-fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], name="EMA50"), row=1, col=1)
+# EMA
+fig.add_trace(go.Scatter(x=df["time"], y=df["EMA20"], line=dict(color="blue"), name="EMA20"), row=1, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["EMA50"], line=dict(color="orange"), name="EMA50"), row=1, col=1)
 
-fig.add_trace(go.Bar(x=df["time"], y=df["MACD_Hist"]), row=2, col=1)
+# Bollinger Bands
+fig.add_trace(go.Scatter(x=df["time"], y=df["Upper"], line=dict(dash="dot", color="gray"), name="BB Upper"), row=1, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["Lower"], line=dict(dash="dot", color="gray"), fill='tonexty'), row=1, col=1)
 
-fig.add_trace(go.Scatter(x=df["time"], y=df["RSI"], name="RSI"), row=3, col=1)
-fig.add_hline(y=70, row=3, col=1)
-fig.add_hline(y=30, row=3, col=1)
+# MACD Histogram
+colors = np.where(df["MACD_Hist"] >= 0, "green", "red")
+fig.add_trace(go.Bar(x=df["time"], y=df["MACD_Hist"], marker_color=colors), row=2, col=1)
 
-fig.update_layout(template="plotly_dark", height=800)
+# MACD lines
+fig.add_trace(go.Scatter(x=df["time"], y=df["MACD"], line=dict(color="blue"), name="MACD"), row=2, col=1)
+fig.add_trace(go.Scatter(x=df["time"], y=df["Signal"], line=dict(color="orange"), name="Signal"), row=2, col=1)
+
+fig.update_layout(template="plotly_dark", height=750, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)
 
 # ─── ORDER BOOK HEATMAP ────────────────────────────────
@@ -190,3 +217,5 @@ if not bids.empty:
 
     heatmap.update_layout(template="plotly_dark", height=400)
     st.plotly_chart(heatmap, use_container_width=True)
+else:
+    st.warning("Order book unavailable")
